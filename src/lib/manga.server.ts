@@ -399,10 +399,18 @@ export async function writePrompts(
     }
   }
 
-  const built = wanted.map((n) => {
+  const built = wanted.map((n, i) => {
     const seg = all[n - 1] as Segment;
-    const text = byNumber.get(n) ?? fallbackPrompt(seg);
-    return sanitizePrompt(text);
+    const own = byNumber.get(n);
+    if (own) return sanitizePrompt(own);
+    if (isEnglishish(seg.text)) return sanitizePrompt(fallbackPrompt(seg));
+    // Non-English line with no written prompt: hold on the nearest neighbour's
+    // written prompt (same scene, same characters) rather than drawing garbage.
+    for (let d = 1; d < wanted.length; d++) {
+      const near = byNumber.get(wanted[i - d] ?? -1) ?? byNumber.get(wanted[i + d] ?? -1);
+      if (near) return sanitizePrompt(near);
+    }
+    throw new Error(`No usable prompt could be written for line ${n} — retry this panel.`);
   });
 
   return chainContinuity(built);
