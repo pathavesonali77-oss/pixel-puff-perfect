@@ -424,10 +424,26 @@ export function chainContinuity(prompts: string[]): string[] {
 
 
 
+/** True when a string is mostly Latin-script text the image engine can read. */
+export function isEnglishish(s: string): boolean {
+  const letters = s.replace(/[^\p{L}]/gu, "");
+  if (!letters) return false;
+  const latin = letters.replace(/[^A-Za-z]/g, "").length;
+  return latin / letters.length >= 0.85;
+}
+
 function fallbackPrompt(s: Segment, action?: string): string {
+  const moment = action ? action : s.text;
+  // The image engine cannot read Hindi/Devanagari: feeding it the raw line
+  // produced pictures unrelated to the story. Only English lines are usable.
+  if (!isEnglishish(moment)) {
+    throw new Error(
+      `No usable prompt could be written for line ${s.index + 1} — retry this panel.`,
+    );
+  }
   return (
     "A single richly detailed full-colour webtoon scene in clear natural lighting, with a fully drawn background, " +
-    `depicting this exact story moment: ${action ? action : s.text}`
+    `depicting this exact story moment: ${moment}`
   );
 }
 
