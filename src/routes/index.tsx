@@ -653,6 +653,35 @@ function Index() {
   }
 
   async function makeVideo() {
+    // The save-location dialog MUST be the very first thing that happens on the
+    // click — browsers only allow it while the user gesture is still "fresh".
+    // Nothing (no state updates, no timeline work) may run before it.
+    const picker = (
+      window as unknown as {
+        showSaveFilePicker?: (o: unknown) => Promise<FileSystemFileHandle>;
+      }
+    ).showSaveFilePicker;
+
+    let handle: FileSystemFileHandle | undefined;
+    let pickerError: string | null = null;
+    let cancelled = false;
+
+    if (picker) {
+      try {
+        handle = await picker({
+          suggestedName: "manga-video.mp4",
+          types: [{ description: "MP4 video", accept: { "video/mp4": [".mp4"] } }],
+        });
+      } catch (e) {
+        const err = e as { name?: string; message?: string };
+        if (err?.name === "AbortError") {
+          cancelled = true;
+        } else {
+          pickerError = err?.message || String(e);
+        }
+      }
+    }
+
     setError(null);
     setSavedTo(null);
     setVideoUrl(null);
@@ -675,32 +704,32 @@ function Index() {
     const seconds = timeline.total;
     const long = seconds > 600; // 10 min+ must stream to disk, not to RAM
 
-
-    let handle: FileSystemFileHandle | undefined;
-    const picker = (
-      window as unknown as {
-        showSaveFilePicker?: (o: unknown) => Promise<FileSystemFileHandle>;
+    if (!handle) {
+      if (pickerError) {
+        // Typically: the page is embedded in a preview frame that blocks the
+        // file dialog. Tell the user the real reason instead of a vague hint.
+        const inFrame = window.self !== window.top;
+        setError(
+          inFrame
+            ? "The save dialog is blocked inside this embedded preview. Open the app in its own browser tab (or publish it) and press Export again."
+            : `The browser refused to open the save dialog: ${pickerError}`,
+        );
+        return;
       }
-    ).showSaveFilePicker;
-
-    if (picker) {
-      try {
-        handle = await picker({
-          suggestedName: "manga-video.mp4",
-          types: [{ description: "MP4 video", accept: { "video/mp4": [".mp4"] } }],
-        });
-      } catch {
+      if (cancelled) {
         if (long) {
           setError("A video this long must be saved to a file. Pick a save location and try again.");
           return;
         }
+        // Short video, user dismissed the dialog: fall through and keep it in memory.
+      } else if (!picker && long) {
+        setError(
+          "This browser cannot stream a multi-hour video to disk. Use desktop Chrome or Edge so the file can be written directly.",
+        );
+        return;
       }
-    } else if (long) {
-      setError(
-        "This browser cannot stream a multi-hour video to disk. Use desktop Chrome or Edge so the file can be written directly.",
-      );
-      return;
     }
+
 
     setPhase("video");
     setVideoPct(0);
