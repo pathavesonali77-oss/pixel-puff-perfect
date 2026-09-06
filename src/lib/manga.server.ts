@@ -339,17 +339,43 @@ export async function writePrompts(
   const wanted = Array.from({ length: count }, (_, i) => from + i);
   const byNumber = new Map<number, string>();
 
-  const absorb = (raw: string) => {
+  const absorb = (raw: string, want: number[]) => {
     // Answers are numbered with the GLOBAL line number, so the parser is fed
     // the highest expected number and the results re-keyed.
     const parsed = parseNumberedList(raw, all.length);
+    const entries: { n: number; text: string }[] = [];
     parsed.forEach((v, idx) => {
-      if (typeof v === "string" && v.trim().length > 30) byNumber.set(idx + 1, v.trim());
+      if (typeof v === "string" && v.trim().length > 30) entries.push({ n: idx + 1, text: v.trim() });
     });
+    if (entries.length === 0) return;
+
+    // The model sometimes renumbers its answer 1..N (or returns unnumbered /
+    // JSON lines, which the parser keys 1..N as well). Those numbers point at
+    // the START of the script, not at the lines we asked for — accepting them
+    // as-is is what produced panels drawn from a completely different part of
+    // the story. If nothing overlaps the requested numbers, or the numbers are
+    // exactly 1..N for a request that does not start at 1, map them back onto
+    // the requested lines in order.
+    const wantSet = new Set(want);
+    const overlap = entries.filter((e) => wantSet.has(e.n)).length;
+    const looksRelative =
+      overlap === 0 ||
+      (want[0] !== 1 && entries.length === want.length && entries.every((e, i) => e.n === i + 1));
+    if (looksRelative) {
+      if (entries.length !== want.length) {
+        console.error(
+          `writePrompts: answer numbering does not match request (${entries.length} prompts for ${want.length} lines) — discarded`,
+        );
+        return;
+      }
+      entries.forEach((e, i) => byNumber.set(want[i] as number, e.text));
+      return;
+    }
+    for (const e of entries) if (wantSet.has(e.n)) byNumber.set(e.n, e.text);
   };
 
   try {
-    absorb(await ask(wanted, 0.7));
+    absorb(await ask(wanted, 0.7), wanted);
   } catch (e) {
     console.error("writePrompts pass failed:", e instanceof Error ? e.message : e);
   }
@@ -358,16 +384,33 @@ export async function writePrompts(
   const missing = wanted.filter((n) => !byNumber.has(n));
   if (missing.length > 0) {
     try {
-      absorb(await ask(missing, 0.5));
+      absorb(await ask(missing, 0.5), missing);
     } catch (e) {
       console.error("writePrompts repair failed:", e instanceof Error ? e.message : e);
     }
   }
 
-  const built = wanted.map((n) => {
+  // Last repair: one line at a time, so numbering can no longer be confused.
+  for (const n of wanted.filter((k) => !byNumber.has(k))) {
+    try {
+      absorb(await ask([n], 0.4), [n]);
+    } catch (e) {
+      console.error(`writePrompts single-line repair failed for ${n}:`, e instanceof Error ? e.message : e);
+    }
+  }
+
+  const built = wanted.map((n, i) => {
     const seg = all[n - 1] as Segment;
-    const text = byNumber.get(n) ?? fallbackPrompt(seg);
-    return sanitizePrompt(text);
+    const own = byNumber.get(n);
+    if (own) return sanitizePrompt(own);
+    if (isEnglishish(seg.text)) return sanitizePrompt(fallbackPrompt(seg));
+    // Non-English line with no written prompt: hold on the nearest neighbour's
+    // written prompt (same scene, same characters) rather than drawing garbage.
+    for (let d = 1; d < wanted.length; d++) {
+      const near = byNumber.get(wanted[i - d] ?? -1) ?? byNumber.get(wanted[i + d] ?? -1);
+      if (near) return sanitizePrompt(near);
+    }
+    throw new Error(`No usable prompt could be written for line ${n} — retry this panel.`);
   });
 
   return chainContinuity(built);
@@ -389,10 +432,26 @@ export function chainContinuity(prompts: string[]): string[] {
 
 
 
+/** True when a string is mostly Latin-script text the image engine can read. */
+export function isEnglishish(s: string): boolean {
+  const letters = s.replace(/[^\p{L}]/gu, "");
+  if (!letters) return false;
+  const latin = letters.replace(/[^A-Za-z]/g, "").length;
+  return latin / letters.length >= 0.85;
+}
+
 function fallbackPrompt(s: Segment, action?: string): string {
+  const moment = action ? action : s.text;
+  // The image engine cannot read Hindi/Devanagari: feeding it the raw line
+  // produced pictures unrelated to the story. Only English lines are usable.
+  if (!isEnglishish(moment)) {
+    throw new Error(
+      `No usable prompt could be written for line ${s.index + 1} — retry this panel.`,
+    );
+  }
   return (
     "A single richly detailed full-colour webtoon scene in clear natural lighting, with a fully drawn background, " +
-    `depicting this exact story moment: ${action ? action : s.text}`
+    `depicting this exact story moment: ${moment}`
   );
 }
 
@@ -835,9 +894,11 @@ export function promptVariant(prompt: string, level: number, line?: string): str
     return `A detailed full-colour webtoon illustration of this moment: ${head}`.slice(0, 320);
   }
 
-  // 4+ — last resort: the script line itself, described neutrally. Always short
-  // and always safe, so a timestamp is never left without a picture.
-  const raw = (line ?? base).replace(/["“”'’]/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, 200);
+  // 4+ — last resort: a short neutral description. The script line itself is
+  // only usable when it is English — the image engine cannot read Hindi, and
+  // feeding it Devanagari drew scenes unrelated to the story.
+  const src = line && isEnglishish(line) ? line : base;
+  const raw = src.replace(/["“”'’]/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, 200);
   return `A detailed full-colour webtoon illustration, fully drawn background, clear natural lighting, showing: ${raw}`;
 }
 
