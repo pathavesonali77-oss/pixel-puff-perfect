@@ -894,9 +894,11 @@ export function promptVariant(prompt: string, level: number, line?: string): str
     return `A detailed full-colour webtoon illustration of this moment: ${head}`.slice(0, 320);
   }
 
-  // 4+ — last resort: the script line itself, described neutrally. Always short
-  // and always safe, so a timestamp is never left without a picture.
-  const raw = (line ?? base).replace(/["“”'’]/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, 200);
+  // 4+ — last resort: a short neutral description. The script line itself is
+  // only usable when it is English — the image engine cannot read Hindi, and
+  // feeding it Devanagari drew scenes unrelated to the story.
+  const src = line && isEnglishish(line) ? line : base;
+  const raw = src.replace(/["“”'’]/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, 200);
   return `A detailed full-colour webtoon illustration, fully drawn background, clear natural lighting, showing: ${raw}`;
 }
 
