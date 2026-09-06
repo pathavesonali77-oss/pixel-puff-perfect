@@ -339,17 +339,43 @@ export async function writePrompts(
   const wanted = Array.from({ length: count }, (_, i) => from + i);
   const byNumber = new Map<number, string>();
 
-  const absorb = (raw: string) => {
+  const absorb = (raw: string, want: number[]) => {
     // Answers are numbered with the GLOBAL line number, so the parser is fed
     // the highest expected number and the results re-keyed.
     const parsed = parseNumberedList(raw, all.length);
+    const entries: { n: number; text: string }[] = [];
     parsed.forEach((v, idx) => {
-      if (typeof v === "string" && v.trim().length > 30) byNumber.set(idx + 1, v.trim());
+      if (typeof v === "string" && v.trim().length > 30) entries.push({ n: idx + 1, text: v.trim() });
     });
+    if (entries.length === 0) return;
+
+    // The model sometimes renumbers its answer 1..N (or returns unnumbered /
+    // JSON lines, which the parser keys 1..N as well). Those numbers point at
+    // the START of the script, not at the lines we asked for — accepting them
+    // as-is is what produced panels drawn from a completely different part of
+    // the story. If nothing overlaps the requested numbers, or the numbers are
+    // exactly 1..N for a request that does not start at 1, map them back onto
+    // the requested lines in order.
+    const wantSet = new Set(want);
+    const overlap = entries.filter((e) => wantSet.has(e.n)).length;
+    const looksRelative =
+      overlap === 0 ||
+      (want[0] !== 1 && entries.length === want.length && entries.every((e, i) => e.n === i + 1));
+    if (looksRelative) {
+      if (entries.length !== want.length) {
+        console.error(
+          `writePrompts: answer numbering does not match request (${entries.length} prompts for ${want.length} lines) — discarded`,
+        );
+        return;
+      }
+      entries.forEach((e, i) => byNumber.set(want[i] as number, e.text));
+      return;
+    }
+    for (const e of entries) if (wantSet.has(e.n)) byNumber.set(e.n, e.text);
   };
 
   try {
-    absorb(await ask(wanted, 0.7));
+    absorb(await ask(wanted, 0.7), wanted);
   } catch (e) {
     console.error("writePrompts pass failed:", e instanceof Error ? e.message : e);
   }
@@ -358,9 +384,18 @@ export async function writePrompts(
   const missing = wanted.filter((n) => !byNumber.has(n));
   if (missing.length > 0) {
     try {
-      absorb(await ask(missing, 0.5));
+      absorb(await ask(missing, 0.5), missing);
     } catch (e) {
       console.error("writePrompts repair failed:", e instanceof Error ? e.message : e);
+    }
+  }
+
+  // Last repair: one line at a time, so numbering can no longer be confused.
+  for (const n of wanted.filter((k) => !byNumber.has(k))) {
+    try {
+      absorb(await ask([n], 0.4), [n]);
+    } catch (e) {
+      console.error(`writePrompts single-line repair failed for ${n}:`, e instanceof Error ? e.message : e);
     }
   }
 
